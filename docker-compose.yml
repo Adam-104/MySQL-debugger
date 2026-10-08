@@ -1,0 +1,30 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: mysql_debugger
+    volumes:
+      - ./db/01-sample-data.sql:/docker-entrypoint-initdb.d/01-sample-data.sql:ro
+      - ./db/02-app-user.sql:/docker-entrypoint-initdb.d/02-app-user.sql:ro
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:mysql://db:3306/mysql_debugger?allowPublicKeyRetrieval=true&useSSL=false
+      DB_USERNAME: debugger
+      DB_PASSWORD: debugger_pw
+    ports:
+      - "8080:8080"
+
+volumes:
+  dbdata:
