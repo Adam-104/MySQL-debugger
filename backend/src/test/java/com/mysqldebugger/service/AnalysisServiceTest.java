@@ -72,7 +72,7 @@ class AnalysisServiceTest {
         SelectExplainer select = new SelectExplainer(flow);
         service = new AnalysisService(new QueryValidator(), new StatementClassifier(), select,
                 new DmlExplainer(flow), new ViewExplainer(flow, select), new TriggerExplainer(),
-                new IndexExplainer(), new IndexSuggester(), new PerformanceAnalyzer(), new FakeDebugService());
+                new IndexExplainer(), new IndexSuggester(), new PerformanceAnalyzer(), new FakeDebugService(), null);
         plan = new ArrayList<>();
     }
 

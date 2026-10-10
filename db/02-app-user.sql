@@ -5,4 +5,7 @@
 -- INSERT/UPDATE/DELETE. If you only want to analyse SELECTs, grant SELECT only.
 CREATE USER IF NOT EXISTS 'debugger'@'%' IDENTIFIED BY 'debugger_pw';
 GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON mysql_debugger.* TO 'debugger'@'%';
+
+-- "Paste your own schema" mode creates a temporary schema named sbx_<random> per request and drops it afterwards.
+GRANT ALL PRIVILEGES ON `sbx\_%`.* TO 'debugger'@'%';
 FLUSH PRIVILEGES;

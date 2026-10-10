@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import { locateStep, splitAround } from '../sqlHighlight.js';
 
-/** Execution flow as a vertical stepper with a "walk through" player. */
-export default function FlowStepper({ steps = [] }) {
+/**
+ * Execution flow as a vertical stepper with a "walk through" player. While a step is active, the matching part of
+ * the user's SQL is highlighted in a panel that stays in view.
+ */
+export default function FlowStepper({ steps = [], query = '' }) {
   const [active, setActive] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const timer = useRef(null);
+  const items = useRef([]);
+  const preRef = useRef(null);
+  const markRef = useRef(null);
 
   // a new analysis resets the player
   useEffect(() => {
@@ -26,9 +33,28 @@ export default function FlowStepper({ steps = [] }) {
     return () => clearInterval(timer.current);
   }, [playing, steps.length]);
 
+  // keep the active step in view while walking through (the query panel stays pinned above)
+  useEffect(() => {
+    if (active < 0) return;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    items.current[active]?.scrollIntoView?.({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+  }, [active]);
+
+  // keep the highlighted part of the query visible inside the (small) query panel
+  useEffect(() => {
+    const pre = preRef.current;
+    const mark = markRef.current;
+    if (!pre) return;
+    pre.scrollTop = mark ? Math.max(0, mark.offsetTop - (pre.clientHeight - mark.offsetHeight) / 2) : 0;
+  }, [active, query]);
+
   if (!steps.length) {
     return <p className="empty">No steps recognised for this statement.</p>;
   }
+
+  const current = active >= 0 ? steps[active] : null;
+  const span = current ? locateStep(query, current) : null;
+  const [before, marked, after] = splitAround(query, span);
 
   function play() {
     setActive(0);
@@ -58,6 +84,28 @@ export default function FlowStepper({ steps = [] }) {
         )}
       </div>
 
+      {query && (
+        <div className="query-view-wrap">
+          <div className="query-view-title">
+            Your query
+            {current && (
+              <>
+                {' '}
+                · step {current.step}: <b>{current.operation}</b>
+              </>
+            )}
+          </div>
+          <pre ref={preRef} className={`query-view${span ? ' has-mark' : ''}`}>
+            <code>
+              {before}
+              {span && <mark ref={markRef}>{marked}</mark>}
+              {after}
+            </code>
+          </pre>
+          {current && !span && <div className="query-view-note">This step is not tied to one clause of the query.</div>}
+        </div>
+      )}
+
       <ol className="flow">
         {steps.map((s, i) => {
           const open = i === active;
@@ -65,6 +113,7 @@ export default function FlowStepper({ steps = [] }) {
           return (
             <li
               key={s.step}
+              ref={(el) => { items.current[i] = el; }}
               className={`${open ? 'open' : ''} ${dim ? 'dim' : ''}`}
               onClick={() => { setPlaying(false); setActive(open ? -1 : i); }}
             >

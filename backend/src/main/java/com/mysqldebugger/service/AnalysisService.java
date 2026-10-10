@@ -37,6 +37,7 @@ public class AnalysisService {
     private final IndexSuggester indexSuggester;
     private final PerformanceAnalyzer performanceAnalyzer;
     private final DebugService debugService;
+    private final SchemaSandboxService sandbox;
 
     public AnalysisService(
             QueryValidator validator,
@@ -48,7 +49,8 @@ public class AnalysisService {
             IndexExplainer indexExplainer,
             IndexSuggester indexSuggester,
             PerformanceAnalyzer performanceAnalyzer,
-            DebugService debugService) {
+            DebugService debugService,
+            SchemaSandboxService sandbox) {
 
         this.validator = validator;
         this.classifier = classifier;
@@ -60,6 +62,28 @@ public class AnalysisService {
         this.indexSuggester = indexSuggester;
         this.performanceAnalyzer = performanceAnalyzer;
         this.debugService = debugService;
+        this.sandbox = sandbox;
+    }
+
+    /**
+     * Analyses {@code rawSql}. When {@code schema} (CREATE TABLE / CREATE INDEX statements) is given, the query is
+     * analysed against an empty temporary copy of that schema instead of the configured database.
+     */
+    public DebugResponse analyze(String rawSql, String schema) {
+        if (schema == null || schema.isBlank()) {
+            return analyze(rawSql);
+        }
+        validator.validate(rawSql); // fail fast before creating anything
+        DebugResponse response = sandbox.withSandbox(schema, () -> analyze(rawSql));
+        boolean withRows = SchemaScript.parse(schema).stream().anyMatch(SchemaScript::isInsert);
+        response.getNotes().add(0, withRows
+                ? "Analysed against a temporary copy of your schema loaded with the sample rows you pasted. With only a few "
+                + "rows MySQL often prefers a full scan even when an index exists (it is cheaper for tiny tables), so "
+                + "judge index usage and costs with realistic row counts."
+                : "Analysed against an empty temporary copy of the schema you pasted. Access types, index choices and "
+                + "ordering/grouping steps are real, but row counts and cost figures are placeholders because the "
+                + "tables hold no data. Paste INSERT statements to add sample rows.");
+        return response;
     }
 
     public DebugResponse analyze(String rawSql) {

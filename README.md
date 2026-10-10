@@ -20,7 +20,24 @@ Built with **Spring Boot** (analysis API) and **React** (UI).
 | `CREATE TRIGGER` | When it fires relative to constraints and writes, per-row cost, invalid `NEW`/`OLD`, writes to its own table, `BEFORE` vs `AFTER` advice |
 | `CREATE INDEX` / `ALTER TABLE … ADD INDEX` | Build process, usable column prefixes, duplicate / redundant indexes (checked against your real schema), `TEXT` prefix, low selectivity |
 
+The **Visual plan** card draws the plan as a top-to-bottom diagram (table access nodes colour-coded by access type, join
+look-ups, temporary table, filesort, result) next to a **row funnel** showing estimated rows read vs rows kept per table.
+All numbers are MySQL's estimates from `EXPLAIN`, not measured values.
+
 Every finding has three parts: **what** MySQL is doing, **why it matters** (the cost), and **how to fix** it.
+
+## The interface
+
+* **Verdict first** – one card with the headline ("1 warning, 1 index suggested"), the biggest problem and the top fix.
+  The detail sits in tabs: *Visual plan · Steps · Fixes · EXPLAIN · Notes*.
+* **SQL editor** (CodeMirror) – syntax colors, line numbers, bracket matching, **Format SQL**, and autocomplete for
+  keywords, your database's tables and columns, and tables from a pasted schema. `Ctrl/⌘ + Enter` analyzes.
+* **Example cards** on the first screen – one click runs an example.
+* **History and share links** – the last 10 queries are kept in your browser; **Share link** puts the query in the
+  URL fragment (`#q=…`), which is never sent to a server. Opening such a link runs the analysis.
+* **Light / dark / auto** theme switch.
+
+The editor and the SQL formatter are loaded on demand (~140 KB and ~75 KB gzipped); the initial page is ~60 KB.
 
 ## Safety model
 
@@ -63,6 +80,41 @@ npm install
 npm run dev
 ```
 
+## Database tables panel
+
+The top of the page lists every table in the connected database with its **row count** and column count
+(`GET /api/tables`). Click a table to fill the editor with a `SELECT` on it. Counts are exact `COUNT(*)`
+values for up to 50 tables, so point the app at a demo / non-huge database.
+
+## "What if I add this index?"
+
+Each suggested index has a **What if I add this index?** button. The app creates the index on a *temporary copy* (built from
+your pasted schema, or a copy of the configured database for the demo tables), analyses the query again and shows
+before / after: how each table is read, which index is used, estimated rows and cost, and whether the extra sort or temporary
+table disappears. Your real database is never changed (`POST /api/whatif`). The copy of the configured database is limited
+to 20 tables and about 500,000 rows. With tiny tables MySQL may ignore the index, and the result then says "No change".
+
+## Analyse your own tables
+
+Open **Use your own tables** under the editor and paste your `CREATE TABLE` / `CREATE INDEX` statements
+(e.g. the output of `SHOW CREATE TABLE`). The query is then analysed against an **empty temporary copy** of
+that schema, which is dropped right afterwards. Nothing connects to your real database.
+
+Click **Load & check tables** to build the temporary tables and see them with their row counts (`POST /api/schema/check`).
+The temporary tables are re-created on every Analyze. While the schema box has content, **only your tables exist**: the
+demo tables (`customers`, ...) are not available, so write the query against your own tables.
+
+You can also paste `INSERT INTO ... VALUES (...)` statements to load **sample rows** into the temporary tables
+(`ANALYZE TABLE` is run afterwards so MySQL's statistics reflect them). The rows exist only for that one analysis.
+
+* Real: access types (full scan vs index), which index MySQL picks, filesort / temp-table steps, index suggestions.
+* Estimates (row counts, costs) are only as realistic as the rows you paste. With a handful of rows MySQL often prefers
+  a full scan even when an index exists, because that is cheaper for tiny tables.
+* Only `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE` and `INSERT INTO` are accepted; `SELECT` (so no `INSERT ... SELECT`),
+  `db.table` names, file options and similar are rejected. Limits: 100,000 characters, 200 statements,
+  4 sandboxes at a time.
+* The MySQL user needs `CREATE`/`DROP` on schemas named `sbx_%` (see `db/02-app-user.sql`). `root` already has it.
+
 ## API
 
 ```http
@@ -94,7 +146,7 @@ Response (abridged):
 ```
 
 Errors are `{"error": "INVALID_QUERY" | "DATABASE_ERROR" | …, "message": "…"}` with HTTP 400.
-`POST /api/debug` is kept as an alias.
+`POST /api/debug` is kept as an alias. `GET /api/tables` and `GET /api/columns` feed the tables panel and editor autocomplete.
 
 ## Project layout
 
@@ -113,7 +165,7 @@ How the backend is organised: `QueryValidator` → `StatementClassifier` → one
 
 ```bash
 cd backend && mvn test      # unit tests need no database; the context-load test needs MySQL
-cd frontend && npm run build
+cd frontend && npm test && npm run build   # 50 component/logic tests (vitest + jsdom)
 ```
 
 ## Deploying
