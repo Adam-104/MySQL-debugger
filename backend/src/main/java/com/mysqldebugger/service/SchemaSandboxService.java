@@ -3,14 +3,17 @@ package com.mysqldebugger.service;
 import com.mysqldebugger.exception.InvalidQueryException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
 
@@ -39,10 +42,34 @@ public class SchemaSandboxService {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
     private final Semaphore slots = new Semaphore(MAX_CONCURRENT);
+    /** Fixed schema names (see {@code app.sandbox.schemas}); null means "use a random sbx_<uuid> name per request". */
+    private final ConcurrentLinkedQueue<String> fixedNames;
 
-    public SchemaSandboxService(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
+    /**
+     * @param fixedSchemas optional comma-separated schema names to reuse as sandboxes (property
+     *                     {@code app.sandbox.schemas}, env {@code APP_SANDBOX_SCHEMAS}). Needed on hosts that do not
+     *                     support wildcard grants such as {@code sbx\_%} (for example MySQL with partial_revokes=ON):
+     *                     grant the database user ALL privileges on exactly these names instead. Each name serves one
+     *                     request at a time, so the number of names is the number of concurrent analyses.
+     */
+    public SchemaSandboxService(JdbcTemplate jdbc, PlatformTransactionManager transactionManager,
+                                @Value("${app.sandbox.schemas:}") String fixedSchemas) {
         this.jdbc = jdbc;
         this.tx = new TransactionTemplate(transactionManager);
+        this.fixedNames = parseNames(fixedSchemas);
+    }
+
+    static ConcurrentLinkedQueue<String> parseNames(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return null;
+        }
+        List<String> names = Arrays.stream(csv.split(",")).map(String::trim).filter(n -> !n.isEmpty()).toList();
+        for (String n : names) {
+            if (!n.matches("[A-Za-z0-9_]{1,40}")) {
+                throw new IllegalArgumentException("Invalid sandbox schema name: " + n);
+            }
+        }
+        return names.isEmpty() ? null : new ConcurrentLinkedQueue<>(names);
     }
 
     /** Fills the sandbox; {@code original} is the connection's default schema before the sandbox was selected. */
@@ -109,20 +136,36 @@ public class SchemaSandboxService {
     // ------------------------------------------------------------------
 
     private <T> T run(Setup setup, Supplier<T> work) {
-        if (!slots.tryAcquire()) {
-            throw new InvalidQueryException("The server is busy analysing other schemas. Please try again in a moment.");
+        String fixed = null;
+        if (fixedNames != null) {
+            fixed = fixedNames.poll();
+            if (fixed == null) {
+                throw busy();
+            }
+        } else if (!slots.tryAcquire()) {
+            throw busy();
         }
         try {
-            return tx.execute(status -> inSandbox(setup, work));
+            final String name = fixed != null ? fixed : "sbx_" + UUID.randomUUID().toString().replace("-", "");
+            return tx.execute(status -> inSandbox(name, setup, work));
         } finally {
-            slots.release();
+            if (fixed != null) {
+                fixedNames.add(fixed);
+            } else {
+                slots.release();
+            }
         }
     }
 
-    private <T> T inSandbox(Setup setup, Supplier<T> work) {
+    private static InvalidQueryException busy() {
+        return new InvalidQueryException("The server is busy analysing other schemas. Please try again in a moment.");
+    }
+
+    private <T> T inSandbox(String name, Setup setup, Supplier<T> work) {
         String original = jdbc.queryForObject("SELECT DATABASE()", String.class);
-        String name = "sbx_" + UUID.randomUUID().toString().replace("-", "");
         try {
+            // A fixed name may have been left behind by a crashed request; random names simply do not exist yet.
+            jdbc.execute("DROP DATABASE IF EXISTS " + quote(name));
             jdbc.execute("CREATE DATABASE " + quote(name));
             jdbc.execute("USE " + quote(name));
 
