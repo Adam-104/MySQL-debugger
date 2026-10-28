@@ -10,6 +10,7 @@ import com.mysqldebugger.service.AnalysisService;
 import com.mysqldebugger.service.SchemaSandboxService;
 import com.mysqldebugger.service.SchemaStatsService;
 import com.mysqldebugger.service.WhatIfService;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -27,13 +28,30 @@ public class DebugController {
     private final SchemaStatsService schemaStatsService;
     private final SchemaSandboxService sandbox;
     private final WhatIfService whatIfService;
+    private final JdbcTemplate jdbc;
 
     public DebugController(AnalysisService analysisService, SchemaStatsService schemaStatsService,
-                           SchemaSandboxService sandbox, WhatIfService whatIfService) {
+                           SchemaSandboxService sandbox, WhatIfService whatIfService, JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
         this.analysisService = analysisService;
         this.schemaStatsService = schemaStatsService;
         this.sandbox = sandbox;
         this.whatIfService = whatIfService;
+    }
+
+    /**
+     * Cheap liveness check used to wake a sleeping host and by uptime monitors.
+     * Always answers 200 once the app is up; "db" says whether the database answered too.
+     */
+    @GetMapping("/health")
+    public Map<String, Object> health() {
+        boolean db;
+        try {
+            db = Integer.valueOf(1).equals(jdbc.queryForObject("SELECT 1", Integer.class));
+        } catch (Exception e) {
+            db = false;
+        }
+        return Map.of("status", "ok", "db", db);
     }
 
     /** Tables in the connected database with their row counts. */

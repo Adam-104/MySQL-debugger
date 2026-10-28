@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { analyze, fetchColumns, fetchTables } from './api.js';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { analyze, fetchColumns, fetchTables, warmUp } from './api.js';
 import { SAMPLES } from './samples.js';
 import { addToHistory, clearHistory, loadHistory, removeFromHistory } from './lib/history.js';
 import { buildShareUrl, decodeShare } from './lib/share.js';
@@ -10,14 +10,12 @@ import ExampleCards from './components/ExampleCards.jsx';
 import HistoryMenu from './components/HistoryMenu.jsx';
 import ShareButton from './components/ShareButton.jsx';
 import TablesPanel from './components/TablesPanel.jsx';
-import Verdict from './components/Verdict.jsx';
-import Tabs from './components/Tabs.jsx';
-import VisualPlan from './components/VisualPlan.jsx';
-import FlowStepper from './components/FlowStepper.jsx';
-import Issues from './components/Issues.jsx';
-import IndexSuggestions from './components/IndexSuggestions.jsx';
-import ExplainTable from './components/ExplainTable.jsx';
-import Notes from './components/Notes.jsx';
+import ServerStatus from './components/ServerStatus.jsx';
+import { ResultsSkeleton } from './components/Skeleton.jsx';
+
+// The analysis view (plan, steps, fixes) is only needed after the first run, so it loads on demand.
+const loadResults = () => import('./components/Results.jsx');
+const Results = lazy(loadResults);
 
 export default function App() {
   const shared = useRef(null);
@@ -55,7 +53,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    warmUp(); // wakes a sleeping free-tier backend while the visitor reads the page
     loadDb();
+    // fetch the results code while the browser is idle, so the first analysis shows instantly
+    const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 1500));
+    idle(() => loadResults().catch(() => {}));
   }, [loadDb]);
 
   const completionSchema = useMemo(
@@ -121,49 +123,10 @@ export default function App() {
     tabsRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
   }
 
-  const flowQuery = result ? result.query || analyzedSql : '';
-
-  const tabs = result
-    ? [
-        result.executionPlan?.length > 0 && {
-          id: 'plan',
-          label: 'Visual plan',
-          content: <VisualPlan plan={result.executionPlan} json={result.jsonExecutionPlan} flow={result.executionFlow} />,
-        },
-        {
-          id: 'steps',
-          label: 'Steps',
-          badge: result.executionFlow?.length || 0,
-          content: <FlowStepper steps={result.executionFlow} query={flowQuery} />,
-        },
-        {
-          id: 'fixes',
-          label: 'Fixes',
-          badge: (result.performanceIssues?.length || 0) + (result.indexSuggestions?.length || 0),
-          content: (
-            <div className="fixes">
-              <Issues issues={result.performanceIssues} />
-              {result.indexSuggestions?.length > 0 && (
-                <>
-                  <h3 className="subhead">Suggested indexes</h3>
-                  <IndexSuggestions suggestions={result.indexSuggestions} query={flowQuery} schema={analyzedSchema} />
-                </>
-              )}
-            </div>
-          ),
-        },
-        result.executionPlan?.length > 0 && {
-          id: 'explain',
-          label: 'EXPLAIN',
-          content: <ExplainTable rows={result.executionPlan} />,
-        },
-        result.notes?.length > 0 && { id: 'notes', label: 'Notes', content: <Notes notes={result.notes} /> },
-      ].filter(Boolean)
-    : [];
-
   return (
     <div className="app">
       <Header />
+      <ServerStatus />
 
       <main>
         <Editor
@@ -196,13 +159,22 @@ export default function App() {
 
         {!result && !loading && !error && <ExampleCards samples={SAMPLES} onPick={runExample} disabled={loading} />}
 
+        {loading && !result && <ResultsSkeleton />}
+
         {result && (
-          <div className="results">
-            <Verdict result={result} onOpenFixes={openFixes} />
-            <div ref={tabsRef} className="tabs-anchor">
-              <Tabs tabs={tabs} active={tab} onChange={setTab} />
+          <Suspense fallback={<ResultsSkeleton />}>
+            <div className={loading ? 'is-refreshing' : undefined}>
+              <Results
+                result={result}
+                analyzedSql={analyzedSql}
+                analyzedSchema={analyzedSchema}
+                tab={tab}
+                onTab={setTab}
+                onOpenFixes={openFixes}
+                tabsRef={tabsRef}
+              />
             </div>
-          </div>
+          </Suspense>
         )}
 
         <TablesPanel

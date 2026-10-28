@@ -22,6 +22,8 @@ vi.mock('./api.js', () => ({
   fetchColumns: vi.fn(),
   checkSchema: vi.fn(),
   whatIf: vi.fn(),
+  warmUp: vi.fn(),
+  onWaking: () => () => {},
 }));
 
 import App from './App.jsx';

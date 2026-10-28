@@ -1,3 +1,5 @@
+import { TablesSkeleton } from './Skeleton.jsx';
+
 /** Collapsible list of the connected database's tables with row counts. Clicking one fills the editor. */
 export default function TablesPanel({ tables, loading, error, onRefresh, onPick }) {
   const total = (tables || []).reduce((sum, t) => sum + t.rows, 0);
@@ -20,6 +22,7 @@ export default function TablesPanel({ tables, loading, error, onRefresh, onPick 
         </button>
       </div>
 
+      {loading && !tables && !error && <TablesSkeleton />}
       {error && <p className="empty">Could not load tables: {error}</p>}
       {tables && tables.length === 0 && <p className="empty">No tables found in this database.</p>}
 

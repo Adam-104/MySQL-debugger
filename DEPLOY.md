@@ -1,17 +1,76 @@
 # Deploying
 
-The app is a single container (Spring Boot serving the built React UI) plus a MySQL 8 database it can reach.
+There are two ways to run the app. Both use the same code.
 
-## Required configuration
-
-| Variable | Meaning | Default |
+| | Layout | Good for |
 |---|---|---|
-| `DB_URL` | JDBC URL, e.g. `jdbc:mysql://host:3306/mydb?allowPublicKeyRetrieval=true&useSSL=false` (use `useSSL=true` for managed databases) | `jdbc:mysql://localhost:3306/mysql_debugger` |
-| `DB_USERNAME` | MySQL user | `root` |
-| `DB_PASSWORD` | MySQL password | `root` |
-| `PORT` / `SERVER_PORT` | HTTP port (set `SERVER_PORT` to match the platform's `PORT`) | `8080` |
+| **A. Split (recommended)** | Frontend on **Vercel** (global CDN, instant page load) + backend on **Render** + MySQL on **Aiven** | Fast first load, free |
+| **B. Single container** | One Docker service serves the UI and the API | VPS, `docker compose`, or a single Render service |
 
-## Option A – any VPS with Docker
+Never put passwords in this repository or in chat. Set them only in the hosting dashboards.
+
+---
+
+## A. Vercel (frontend) + Render (backend) + Aiven (MySQL)
+
+```
+Browser ──► Vercel (static React files, CDN)
+   │
+   └──────► Render (Spring Boot API) ──► Aiven (MySQL)
+```
+
+The browser loads the page from Vercel in a fraction of a second, then calls the Render API directly.
+Render's free service sleeps when idle, so the page sends a small wake-up request the moment it opens and shows a
+"Waking up the server" notice if the first answer is slow.
+
+### Step 1: backend on Render
+
+If the backend is already running on Render from the earlier setup, keep it and only add one variable (below).
+
+New service: *New → Web Service → connect the GitHub repo → Language: Docker*. Use the root `Dockerfile`, or
+`Dockerfile.api` for a faster, smaller backend-only build (set *Dockerfile Path* to `./Dockerfile.api`).
+
+Environment variables:
+
+| Variable | Value |
+|---|---|
+| `DB_URL` | `jdbc:mysql://<host>:<port>/mysql_debugger?sslMode=REQUIRED` |
+| `DB_USERNAME` | the limited database user |
+| `DB_PASSWORD` | its password |
+| `APP_SANDBOX_SCHEMAS` | only for hosts without wildcard grants such as Aiven: `sbxslot1,sbxslot2,sbxslot3,sbxslot4` |
+| `APP_CORS_ORIGINS` | your Vercel address, for example `https://your-app.vercel.app` (comma-separate several; `*` is allowed as a wildcard, for example `https://your-app-*.vercel.app` for preview deployments) |
+
+Without `APP_CORS_ORIGINS` the browser blocks the calls from Vercel.
+
+After deploying, open `https://<your-service>.onrender.com/api/health`. It should answer `{"status":"ok","db":true}`.
+
+### Step 2: frontend on Vercel
+
+1. vercel.com → *Add New → Project* → import the same GitHub repository.
+2. **Root Directory:** `frontend`. Vercel detects Vite; `frontend/vercel.json` already sets build command, output folder and cache headers.
+3. **Environment Variables:** `VITE_API_BASE_URL` = `https://<your-service>.onrender.com` (no trailing slash).
+4. *Deploy*.
+5. Copy the Vercel address into `APP_CORS_ORIGINS` on Render (Step 1) and let Render redeploy.
+
+`VITE_API_BASE_URL` is baked in at build time. If you change it, redeploy the Vercel project.
+
+### Step 3 (optional): keep the backend awake
+
+A free Render service sleeps after about 15 minutes without traffic and needs up to a minute to start again.
+A free uptime monitor (for example UptimeRobot) that requests `https://<your-service>.onrender.com/api/health` every 5 minutes keeps it awake,
+and also keeps a free Aiven database from idling because the health check runs `SELECT 1`.
+One always-on free web service fits inside Render's monthly free hours; check Render's current free-tier terms.
+
+### Why the page is fast
+
+* Initial download is about 56 KB gzipped (React plus the app). The code editor, the results view and the SQL formatter load only when needed, and the results code is fetched while the browser is idle.
+* Vercel serves the files from a CDN with long-lived caching for hashed assets.
+* The browser opens the connection to the API host early (`preconnect`) and pings `/api/health` immediately.
+* API responses are compressed, and failed or slow requests retry automatically while the backend starts.
+
+---
+
+## B. Single container
 
 ```bash
 git clone <your-repo-url> && cd mysql-debugger
@@ -19,69 +78,64 @@ docker compose up -d --build
 ```
 
 Put a reverse proxy with HTTPS in front (Caddy or nginx) and expose only 443.
-Change the passwords in `docker-compose.yml` / `db/02-app-user.sql` first.
+On a platform such as Render use the root `Dockerfile`; the UI and API are then the same origin, so `VITE_API_BASE_URL`
+and `APP_CORS_ORIGINS` are not needed.
 
-## Option B – a container platform (Railway, Render, Fly.io, …)
+---
 
-1. Create a MySQL 8 database on the platform (or any managed MySQL).
-2. Load `db/01-sample-data.sql` if you want the demo tables, and create a limited user like in `db/02-app-user.sql`.
-3. Create a service from this repository using the root `Dockerfile`.
-4. Set `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` (and `SERVER_PORT` if the platform injects `PORT`).
+## Configuration reference (backend)
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `DB_URL` | JDBC URL (`sslMode=REQUIRED` for managed databases) | `jdbc:mysql://localhost:3306/mysql_debugger` |
+| `DB_USERNAME` | MySQL user | `root` |
+| `DB_PASSWORD` | MySQL password | `root` (local only) |
+| `PORT` / `SERVER_PORT` | HTTP port; hosts set `PORT` | `8080` |
+| `APP_CORS_ORIGINS` | Allowed frontend origins, comma separated, `*` wildcard allowed | empty (same-origin only) |
+| `APP_SANDBOX_SCHEMAS` | Fixed names of temporary schemas (see below) | empty (random `sbx_<id>` names) |
+| `JAVA_OPTS` | JVM options | `-XX:MaxRAMPercentage=75` |
+
+Frontend build variable: `VITE_API_BASE_URL` (see above).
 
 ## "Use your own tables" mode (temporary schemas)
 
-Each request that includes a schema creates a schema named `sbx_<random>` and drops it afterwards. The database user
-therefore needs `GRANT ALL PRIVILEGES ON \`sbx\_%\`.* TO 'debugger'@'%';` (already in `db/02-app-user.sql`). If your
-database was created before this change, run that GRANT once by hand (the init scripts only run on a fresh volume).
-"What if I add this index?" on the demo tables copies the configured database (structure and rows, max 20 tables / about 500,000 rows) into the same kind of temporary schema, so the same `sbx_%` privilege plus `SELECT` on the real schema is enough.
-If the server is killed mid-request a leftover `sbx_...` schema can remain; list them with
-`SHOW DATABASES LIKE 'sbx\_%';` and drop them.
+Each request that includes a schema creates a temporary schema and drops it afterwards.
+
+* **Hosts that allow wildcard grants** (local MySQL, docker compose): the user needs
+  ``GRANT ALL PRIVILEGES ON `sbx\_%`.* TO 'debugger'@'%';`` (already in `db/02-app-user.sql`). Schemas are named `sbx_<random>`.
+* **Hosts with `partial_revokes` on (Aiven)**: wildcard grants do not take effect. Create four fixed schemas, grant the user
+  access to exactly those, and set `APP_SANDBOX_SCHEMAS`:
+
+  ```sql
+  CREATE DATABASE sbxslot1; CREATE DATABASE sbxslot2; CREATE DATABASE sbxslot3; CREATE DATABASE sbxslot4;
+  GRANT ALL PRIVILEGES ON sbxslot1.* TO 'debugger'@'%';
+  GRANT ALL PRIVILEGES ON sbxslot2.* TO 'debugger'@'%';
+  GRANT ALL PRIVILEGES ON sbxslot3.* TO 'debugger'@'%';
+  GRANT ALL PRIVILEGES ON sbxslot4.* TO 'debugger'@'%';
+  ```
+
+  At most four sandboxes run at once; extra requests get a "busy, try again" message.
+
+"What if I add this index?" on the demo tables copies the configured database (max 20 tables / about 500,000 rows)
+into one of these temporary schemas. If the server is killed mid-request a leftover schema can remain; list them with
+``SHOW DATABASES LIKE 'sbx%';`` and clean them up.
 
 ## Before exposing it publicly
 
 The app analyses SQL that visitors type. It never executes it, but:
 
-* **Use a dedicated database** that contains only demo / non-sensitive data. `EXPLAIN` output and
-  `INFORMATION_SCHEMA` lookups reveal table and column names to anyone who can use the app.
-* **Use the least-privilege user** from `db/02-app-user.sql`, never `root`.
-* **Add authentication and rate limiting** (reverse proxy, or Spring Security) if the app is on the open internet;
-  there is none built in.
-* Serve over **HTTPS**.
+* **Use a dedicated database** that contains only demo data. `EXPLAIN` output and `INFORMATION_SCHEMA` lookups reveal table and column names to anyone who can use the app.
+* **Use the least-privilege user** from `db/02-app-user.sql` (change its password first), never `root` / `avnadmin`.
+* **Add authentication and rate limiting** if the app is on the open internet; none is built in.
+* Serve over **HTTPS** (Vercel and Render do this for you).
+* If a password was ever pasted into a chat, an issue or a commit, rotate it.
 
-## Step by step: GitHub + a host
-
-### 1. Push to GitHub
+## Push to GitHub
 
 ```bash
-cd mysql-debugger-repo/repo
 git add .
-git commit -m "Add table row counts, responsive UI"
-git branch -M main
-git remote add origin https://github.com/<your-username>/mysql-debugger.git   # create the empty repo on github.com first
-git push -u origin main
+git commit -m "Vercel + Render split, faster loading, typewriter header"
+git push
 ```
 
-The CI workflow in `.github/workflows/ci.yml` then runs the tests and the Docker build on every push.
-
-### 2. Get a hosted MySQL (your laptop's MySQL is not reachable from the internet)
-
-Use any managed MySQL 8 (Railway, Aiven, TiDB Cloud, PlanetScale-compatible hosts, a VPS…). Free tiers change, so check
-current limits. Note the host, port, database name, user and password.
-
-Load the demo data into it. If your hosted database is not named `mysql_debugger`, remove the first
-`CREATE DATABASE` / `USE` lines from `db/01-sample-data.sql` and run it against your database instead.
-
-### 3. Deploy the app (Docker)
-
-On Render / Railway / Fly.io: *New → Web Service → connect the GitHub repo → runtime Docker* (it uses the root `Dockerfile`).
-Set these environment variables:
-
-| Variable | Example |
-|---|---|
-| `DB_URL` | `jdbc:mysql://<host>:<port>/<database>?useSSL=true` |
-| `DB_USERNAME` | the limited user |
-| `DB_PASSWORD` | its password |
-
-`PORT` is read automatically. After the deploy finishes, open the service URL: the UI and the API are served by the same app.
-
-Give the service at least 512 MB RAM (it is a JVM app); free instances may sleep when idle and start slowly.
+Vercel and Render both redeploy automatically on every push. The CI workflow (`.github/workflows/ci.yml`) runs the backend and frontend tests.
