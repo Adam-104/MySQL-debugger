@@ -2,9 +2,9 @@
 
 > Paste a MySQL statement and see **how MySQL will run it**, **why it may be slow**, and **how to fix it**, without ever executing your statement.
 
-**Live demo:** <https://mysql-debugger.onrender.com> (free hosting: the first visit after a quiet period can take up to a minute while the server wakes up)
+**Live demo:** <https://my-sql-debugger.vercel.app> (frontend on Vercel, API on `https://mysql-debugger.onrender.com`). Free hosting: the first visit after a quiet period can take up to a minute while the API wakes up; the page tells you when that happens.
 
-Built with **Spring Boot 4 / Java 25** (analysis API), **React 18 + Vite** (UI) and **MySQL 8**.
+Built with **Spring Boot 4 / Java 25** (analysis API), **React 18 + Vite** (UI) and **MySQL 8**. Deployed as **Vercel** (UI) + **Render** (API) + **Aiven** (MySQL).
 
 ---
 
@@ -22,7 +22,7 @@ Built with **Spring Boot 4 / Java 25** (analysis API), **React 18 + Vite** (UI) 
 10. [Configuration reference](#10-configuration-reference)
 11. [Testing](#11-testing)
 12. [CI](#12-ci)
-13. [Deployment (GitHub → Render + Aiven)](#13-deployment-github--render--aiven)
+13. [Deployment (GitHub → Vercel + Render + Aiven)](#13-deployment-github--vercel--render--aiven)
 14. [Security and privacy](#14-security-and-privacy)
 15. [Troubleshooting](#15-troubleshooting)
 16. [Limitations and ideas](#16-limitations-and-ideas)
@@ -78,6 +78,8 @@ Full table scan (a warning above 1,000 estimated rows, otherwise a notice), inde
 | **Use your own tables** | Paste a schema (and sample rows); "Load & check tables" shows what was created; a banner reminds you that schema mode is on. |
 | **Tables panel** | Every table of the connected database with its exact row count; click one to fill the editor. |
 | **History and share links** | Last 10 queries kept in your browser. **Share** puts the query in the URL fragment (`#q=…`), which is never sent to a server. Opening such a link runs the analysis. |
+| **Typewriter header** | The title area types out its question lines ("Why is this query slow?") and settles on the tagline. It is static for visitors who prefer reduced motion. |
+| **Server status and loading states** | If the API is slow because free hosting is waking up, a "Waking up the server" notice appears; placeholders hold the layout while tables and results load. |
 | **Light / dark / system theme** | Remembered in your browser. |
 | **Responsive** | Works from phone to desktop; tables turn into stacked cards on narrow screens. |
 
@@ -106,6 +108,17 @@ flowchart TD
     FE --> OUT[Verdict, Visual plan, Steps, Fixes, EXPLAIN, Notes]
 ```
 
+### Request path in production
+
+```mermaid
+flowchart LR
+    B([Browser]) -->|1. page and scripts| V[Vercel CDN<br/>static React build]
+    B -->|2. GET /api/health, then /api/analyze| R[Render<br/>Spring Boot API]
+    R -->|JDBC over TLS| A[(Aiven MySQL)]
+```
+
+The page comes from Vercel; the browser then calls the Render API directly (cross-origin, allowed by `APP_CORS_ORIGINS`). The very first thing the page does is ping `/api/health`, which wakes a sleeping free-tier API while the visitor reads.
+
 When a **schema** is supplied, `AnalysisService` first asks `SchemaSandboxService` to create a temporary schema, run the pasted `CREATE TABLE` / `INSERT` statements in it, and run the whole analysis **inside** that schema. The temporary schema is dropped afterwards.
 
 1. **Validate.** Reject empty or over-long input, stacked statements, executable comments and dangerous functions.
@@ -122,12 +135,12 @@ When a **schema** is supplied, `AnalysisService` first asks `SchemaSandboxServic
 | Layer | Technology |
 |---|---|
 | Backend | Java 25, Spring Boot 4.1.1 (`spring-boot-starter-webmvc`, `spring-boot-starter-data-jdbc`), Maven, MySQL Connector/J, Jackson |
-| Frontend | React 18, Vite 5, plain CSS with theme variables, CodeMirror 6 (`@codemirror/*`), `sql-formatter` |
+| Frontend | React 18, Vite 5 (code splitting, vendor chunks), plain CSS with theme variables, CodeMirror 6 (`@codemirror/*`), `sql-formatter` |
 | Database | MySQL 8 (8.4 in Docker Compose) |
 | Tests | JUnit 5 (backend), Vitest + Testing Library + jsdom (frontend) |
 | Packaging | Multi-stage `Dockerfile` (Node build → Maven build → small JRE image) |
 | CI | GitHub Actions |
-| Hosting used | Render (web service, Docker) + Aiven (managed MySQL) |
+| Hosting used | **Vercel** (static frontend on a CDN) + **Render** (API, Docker web service) + **Aiven** (managed MySQL) |
 
 No router, no state library, no UI framework: the app is a single page.
 
@@ -225,8 +238,8 @@ Two features need a place to try things without touching real data: **your own t
 * Everything runs on **one pooled connection** inside a transaction, so the normal `JdbcTemplate` calls elsewhere in the code transparently see the sandbox as the default schema.
 * Concurrency is limited to **4** at a time; a fifth request gets "The server is busy… try again".
 * **Schema naming has two modes:**
-  * *Random names* (default): `sbx_<uuid>` per request. Needs a database user with `CREATE`/`DROP` on the pattern `` `sbx\_%` ``.
-  * *Fixed names*: set `APP_SANDBOX_SCHEMAS=sbxslot1,sbxslot2,sbxslot3,sbxslot4`. Each name serves one request at a time (so the number of names is the concurrency). Use this on hosts that **do not support wildcard grants**, for example MySQL with `partial_revokes=ON`, which is the case on Aiven's MySQL. Grant the app user `ALL` on exactly those names instead.
+    * *Random names* (default): `sbx_<uuid>` per request. Needs a database user with `CREATE`/`DROP` on the pattern `` `sbx\_%` ``.
+    * *Fixed names*: set `APP_SANDBOX_SCHEMAS=sbxslot1,sbxslot2,sbxslot3,sbxslot4`. Each name serves one request at a time (so the number of names is the concurrency). Use this on hosts that **do not support wildcard grants**, for example MySQL with `partial_revokes=ON`, which is the case on Aiven's MySQL. Grant the app user `ALL` on exactly those names instead.
 
 ### 6.4 Models
 
@@ -302,7 +315,7 @@ Content-Type: application/json
 
 * **State:** the SQL text, the optional schema, the last analysis result, the active tab, loading and error, the history list, and the connected database's tables and columns.
 * **Run:** `run(sql, schema)` → `api.analyze` → store the result, switch to the *Fixes* tab, add to history, and write a share link into the address bar.
-* **On load:** if the URL has `#q=…`, the query is filled in and analysed immediately. Tables and columns are fetched once for the tables panel and autocomplete.
+* **On load:** the page pings `/api/health` to wake the API, and fetches the results view's code while the browser is idle. If the URL has `#q=…`, the query is filled in and analysed immediately. Tables and columns are fetched once for the tables panel and autocomplete.
 * **Layout:** header → editor → (example cards when nothing has run yet) → verdict + tabs → tables panel.
 
 ### 7.2 Components (`src/components/`)
@@ -348,7 +361,8 @@ Content-Type: application/json
 
 ### 7.4 Design notes
 
-* **Performance:** the first page is about 60 KB gzipped. The editor (~140 KB) and the formatter (~75 KB) load on demand.
+* **Performance:** the first page is about 56 KB of JavaScript gzipped (React plus the app). The code editor (~140 KB), the results view and the SQL formatter (~75 KB) load on demand, vendor code sits in separate long-cached files, and the browser opens the connection to the API host early (`preconnect`).
+* **Resilience:** every API call in `api.js` has a 70-second timeout and retries on network failures and 502/503/504, so a cold-starting backend usually succeeds without the visitor doing anything.
 * **Accessibility:** tabs follow the WAI-ARIA pattern; severity and status always use an **icon and a label**, never colour alone; focus rings are visible; the plan has a table alternative.
 * **Privacy:** history is stored only in your browser; share links keep the query in the URL fragment, which browsers do not send to servers.
 * **Theme:** colours are CSS variables. Dark values apply for the system theme through `prefers-color-scheme` and for the explicit choice through `data-theme`.
@@ -455,11 +469,20 @@ cd frontend && npm test && npm run build # Vitest + jsdom, then a production bui
 
 ---
 
-## 13. Deployment (GitHub → Render + Aiven)
+## 13. Deployment (GitHub → Vercel + Render + Aiven)
 
-The app is **one container** (Spring Boot serving the built React UI) plus **a MySQL 8 database it can reach**. This section records the setup used for the live demo; the same pattern works on other hosts.
+The live demo runs as three free services:
 
-> **Two layouts.** The steps below describe the single-container setup. For the faster split layout (UI on **Vercel**, API on **Render**) follow [DEPLOY.md](DEPLOY.md): set `VITE_API_BASE_URL` on Vercel and `APP_CORS_ORIGINS` on Render.
+```mermaid
+flowchart LR
+    G[(GitHub repo)] -->|auto deploy, root: frontend| V[Vercel<br/>React build on a CDN]
+    G -->|auto deploy, Dockerfile| R[Render<br/>Spring Boot API]
+    R --> A[(Aiven<br/>MySQL 8.4)]
+    B([Browser]) --> V
+    B -->|VITE_API_BASE_URL| R
+```
+
+Every `git push` to `main` redeploys both Vercel and Render. The same repository also supports a **single-container** layout (section 13.8). `DEPLOY.md` has a shorter checklist version of this section.
 
 ### 13.1 Push to GitHub
 
@@ -467,19 +490,21 @@ The app is **one container** (Spring Boot serving the built React UI) plus **a M
 git add .
 git commit -m "Your message"
 git branch -M main
-git remote add origin https://github.com/<your-username>/mysql-debugger.git   # empty repo created first
+git remote add origin https://github.com/<your-username>/mysql-debugger.git   # only the first time
 git push -u origin main
 ```
 
-### 13.2 Database (Aiven free MySQL, as used here)
+If `git push` says the remote contains work you do not have, run `git pull --no-rebase --no-edit`, resolve any conflict, then push again. Do not force-push.
+
+### 13.2 Database (Aiven free MySQL)
 
 1. Create a MySQL service on the free plan and note host, port, user and password.
-2. Create the database and load the demo data (type the password at the prompt rather than on the command line):
+2. Create the database and load the demo data (type the password at the prompt, not on the command line):
    ```bash
    mysql -h HOST -P PORT -u avnadmin -p --ssl-mode=REQUIRED -e "CREATE DATABASE IF NOT EXISTS mysql_debugger"
    mysql -h HOST -P PORT -u avnadmin -p --ssl-mode=REQUIRED < db/01-sample-data.sql
    ```
-3. Create the limited app user (`db/02-app-user.sql`, **with your own password**; do not commit that password).
+3. Create the limited app user (`db/02-app-user.sql`, **with your own password**; never commit it).
 4. **Aiven specific:** it runs MySQL with `partial_revokes=ON`, so wildcard grants such as `` `sbx\_%` `` never take effect. Grant fixed names instead:
    ```sql
    GRANT ALL PRIVILEGES ON sbxslot1.* TO 'debugger'@'%';
@@ -487,11 +512,10 @@ git push -u origin main
    GRANT ALL PRIVILEGES ON sbxslot3.* TO 'debugger'@'%';
    GRANT ALL PRIVILEGES ON sbxslot4.* TO 'debugger'@'%';
    ```
-   and set `APP_SANDBOX_SCHEMAS=sbxslot1,sbxslot2,sbxslot3,sbxslot4` on the web service.
 
-### 13.3 Web service (Render)
+### 13.3 Backend on Render
 
-*New → Web Service → connect the GitHub repo → Language **Docker** → Instance type **Free** (or paid).* Set:
+*New → Web Service → connect the GitHub repo → Language **Docker** → Instance type **Free**.* The root `Dockerfile` works; `Dockerfile.api` is a backend-only variant that builds faster (set **Dockerfile Path** to `./Dockerfile.api`). Environment variables:
 
 | Key | Value |
 |---|---|
@@ -499,19 +523,43 @@ git push -u origin main
 | `DB_USERNAME` | `debugger` |
 | `DB_PASSWORD` | the app user's password |
 | `APP_SANDBOX_SCHEMAS` | `sbxslot1,sbxslot2,sbxslot3,sbxslot4` |
+| `APP_CORS_ORIGINS` | the Vercel address, e.g. `https://my-sql-debugger.vercel.app` (no trailing slash; `*` wildcards allowed, e.g. `https://my-sql-debugger-*.vercel.app` for previews) |
 
-Render sets `PORT` itself. Every later `git push` to `main` redeploys automatically.
+Render sets `PORT` itself. When the deploy shows **Live**, open `https://<your-service>.onrender.com/api/health`: it should answer `{"status":"ok","db":true}`.
 
-### 13.4 After it is live
+### 13.4 Frontend on Vercel
 
-* Open `/api/tables`; you should see your tables with row counts.
-* Press **Ctrl+F5** after a UI update so the browser does not show a cached page.
+1. vercel.com → *Add New → Project* → import the GitHub repository.
+2. **Root Directory:** `frontend`. Vercel detects Vite; `frontend/vercel.json` sets the build command, output folder, one-year caching for hashed files in `/assets`, and security headers.
+3. **Environment Variables:** `VITE_API_BASE_URL` = `https://<your-service>.onrender.com` (no trailing slash). If Vercel warns that a variable with a public prefix will be exposed to the browser, set its type to **Config** and keep the name: the value is only the public API address, and the `VITE_` prefix is what makes Vite include it in the build.
+4. *Deploy*, then put the resulting Vercel address into `APP_CORS_ORIGINS` on Render (section 13.3).
+
+`VITE_API_BASE_URL` is read **at build time**. After changing it, redeploy the Vercel project (untick the build cache option if shown), otherwise the old value stays in the built files.
+
+### 13.5 After it is live
+
+* Open the Vercel address and press **Ctrl+F5**. The *Database tables* panel should list your tables, and an example card should return results.
+* The first request after a quiet period can take up to a minute; the page shows "Waking up the server" meanwhile.
 * Rotate any password that has ever been pasted into a chat, ticket or screenshot.
 
-### 13.5 Free-tier behaviour
+### 13.6 Free-tier behaviour
 
-* The free web service sleeps when idle; the first request can take up to about a minute (the JVM needs roughly 60 seconds to start on the free CPU).
+* A free Render web service sleeps after about 15 minutes without traffic and needs up to a minute to start again (the JVM is slow on the free CPU). The page's wake-up ping and automatic retries hide most of this.
+* **Optional:** a free uptime monitor (for example UptimeRobot) requesting `/api/health` every 5 minutes keeps the API awake. Because the health check runs `SELECT 1`, it also keeps a free Aiven database from idling. Check Render's current free-tier terms before relying on this.
 * The free Aiven service can be powered off when unused. Turn it back on from its dashboard if the site reports a database error.
+
+### 13.7 Configuration summary
+
+| Where | Variable | Purpose |
+|---|---|---|
+| Render | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | Database connection |
+| Render | `APP_SANDBOX_SCHEMAS` | Fixed temporary-schema names (Aiven) |
+| Render | `APP_CORS_ORIGINS` | Frontend addresses allowed to call the API |
+| Vercel | `VITE_API_BASE_URL` | Where the built frontend sends API calls |
+
+### 13.8 Alternative: one container
+
+The root `Dockerfile` builds the React app and bundles it into the Spring Boot jar, so a single service serves both the UI and the API from one address. In that layout `VITE_API_BASE_URL` and `APP_CORS_ORIGINS` are not needed. This is what `docker compose up -d --build` runs, and it suits a VPS or a single Render service.
 
 ---
 
@@ -554,7 +602,11 @@ Render sets `PORT` itself. Every later `git push` to `main` redeploys automatica
 | Error persists after a fix | The browser may be showing a cached page. Press **Ctrl+F5**. |
 | *The server is busy analysing other schemas* | All four sandbox slots are in use. Retry in a moment. |
 | MySQL ignores a suggested index in "What if" | With tiny tables a full scan is cheaper. The result then says "No change". Use more rows. |
-| Site slow on first visit | Free hosting sleeps when idle. |
+| Site slow on first visit | Free hosting sleeps when idle. The page shows "Waking up the server" and retries by itself. |
+| Vercel page shows *Could not load tables: Request failed (404)* | The built page is asking Vercel itself for `/api/...`, so `VITE_API_BASE_URL` was missing when the build ran. Add it in Vercel (name spelled exactly, no trailing slash), then **Redeploy** and press Ctrl+F5. |
+| Vercel page shows *Cannot reach the backend* after a minute | Usually CORS or a typo. On Render, `APP_CORS_ORIGINS` must equal the Vercel address exactly (with `https://`, no trailing slash), and the redeploy must be finished. Check that `<render-address>/api/health` answers. |
+| Vercel warns about a public prefix when saving `VITE_API_BASE_URL` | Expected. Set the variable type to **Config**; the value is a public address, and the `VITE_` prefix must stay. |
+| `git push` rejected: *remote contains work that you do not have* | Run `git pull --no-rebase --no-edit`, resolve any conflict, then `git push`. Do not force-push. |
 
 ---
 
@@ -590,16 +642,17 @@ Render sets `PORT` itself. Every later `git push` to `main` redeploys automatica
 
 **Why the sandbox exists.** To analyse a visitor's own tables, or to test an index, the app builds a temporary schema, does the work inside it on a single connection, and drops it afterwards, so real data is never touched.
 
-**Why a Spring Boot + React split.** The backend owns anything that must be trusted (validation, database access, analysis); the frontend only renders. In production the React build is bundled into the Spring Boot jar, so it ships as one container.
+**Why a Spring Boot + React split.** The backend owns anything that must be trusted (validation, database access, analysis); the frontend only renders. In production the React build is hosted separately on Vercel's CDN so the page loads instantly, while the API runs on Render; the same repository can also ship as one container.
 
 **What makes the UI approachable.** The verdict comes first; details are in tabs; examples run in one click; the editor autocompletes your tables; history and share links make results easy to revisit and send.
 
-**Honest limits.** Estimates, not measurements; no accounts (demo data only); free hosting sleeps.
+**Honest limits.** Estimates, not measurements; no accounts (demo data only); free hosting sleeps, so the first request after a quiet period is slow.
 
 **Questions people ask**
 
 * *Is it safe to paste a real query?* It is analysed, not executed, and nothing is stored on the server. Do not paste secrets.
 * *Why do indexes sometimes not help in the demo?* MySQL chooses a full scan when tables are tiny. The what-if result says so.
+* *Why host the frontend and backend separately?* Static files load fast from a CDN even while the free API is asleep. The API only has to wake once, and the page pings it immediately, retries automatically and shows a notice meanwhile. The cost is CORS: the API must list the Vercel address in `APP_CORS_ORIGINS`.
 * *Why no login?* It is a public tool over demo data; the protection is a limited database user, validation, and size and concurrency limits.
 * *How does it find which part of my SQL a step refers to?* The backend returns each step's literal expression; the frontend searches for it right after its clause keyword and highlights that range.
 * *How would you scale it?* Add rate limiting, raise the sandbox slot count, and move to a larger instance.
